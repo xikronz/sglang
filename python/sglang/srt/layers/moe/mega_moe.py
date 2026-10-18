@@ -200,7 +200,14 @@ def should_fuse_mega_moe_shared_experts(moe: DeepseekV2MoE) -> bool:
         and is_sm100_supported()
         and _mega_moe_mma_type(moe.experts) == "fp8xfp4"
         and moe.shared_experts_is_fp8
-        and moe.shared_experts_weight_block_size == [128, 128]
+        and (
+            moe.shared_experts_weight_block_size == [128, 128]
+            or (
+                moe.shared_experts_weight_block_size == [32, 32]
+                and moe.shared_experts.gate_up_proj.quant_method.quant_config.scale_fmt
+                == "ue8m0"
+            )
+        )
     )
 
 
@@ -604,13 +611,17 @@ def _transform_mega_moe_shared_sf(linear) -> torch.Tensor:
 
     n, k = linear.weight.shape
     sf = linear.weight_scale_inv.data
-    if sf.dtype == torch.int32:
-        # Requantized for the DeepGEMM linear runner.
-        sf = inverse_transform_scale_ue8m0(sf, mn=n)[:, : k // 128]
+    block_n, block_k = linear.quant_method.quant_config.weight_block_size
+
+    if block_k == 128:
+        if sf.dtype == torch.int32:
+            # Requantized for the DeepGEMM linear runner.
+            sf = inverse_transform_scale_ue8m0(sf, mn=n)[:, : k // 128]
+        sf = sf.repeat_interleave(4, dim=-1)
     return transform_sf_into_required_layout(
-        sf.repeat_interleave(4, dim=-1),
+        sf,
         mn=n,
         k=k,
-        recipe=(128, 32),
+        recipe=(block_n, 32),
         disable_ue8m0_cast=False,
     )
